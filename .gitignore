@@ -1,0 +1,8 @@
+.env
+data/flask_secret
+data/game.db
+data/game.db-wal
+data/game.db-shm
+data/bot.log
+__pycache__/
+*.pyc

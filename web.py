@@ -3,10 +3,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
+import json
 import logging
 import os
 import secrets
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from flask import Flask, abort, jsonify, render_template_string, request, session
@@ -16,6 +20,29 @@ from engine import counts, get_riddle, pick_random_riddle
 
 log = logging.getLogger("zagadochnik.web")
 _tg_app = None
+_tg_loop = asyncio.new_event_loop()
+
+
+def _tg_run(coro):
+    """Один цикл на весь процесс — httpx не переживает закрытый loop."""
+    asyncio.set_event_loop(_tg_loop)
+    return _tg_loop.run_until_complete(coro)
+
+
+def _set_webhook_http(token: str, url: str) -> None:
+    api = f"https://api.telegram.org/bot{token}/setWebhook"
+    body = json.dumps({"url": url, "drop_pending_updates": True}).encode()
+    req = urllib.request.Request(
+        api, data=body, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.load(resp)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", "replace")
+        raise RuntimeError(f"setWebhook HTTP {exc.code}: {raw}") from exc
+    if not data.get("ok"):
+        raise RuntimeError(f"setWebhook: {data}")
 
 
 def _flask_secret() -> str:
@@ -48,16 +75,17 @@ def setup_telegram_webhook() -> None:
     if not base:
         log.info("Telegram webhook: нет RENDER_EXTERNAL_URL / WEBHOOK_URL")
         return
-    from asgiref.sync import async_to_sync
+    try:
+        from bot import build_application, webhook_secret
 
-    from bot import build_application, webhook_secret
-
-    _tg_app = build_application(webhook=True)
-    async_to_sync(_tg_app.initialize)()
-    async_to_sync(_tg_app.start)()
-    url = f"{base}/tg/{webhook_secret(token)}"
-    async_to_sync(_tg_app.bot.set_webhook)(url=url, drop_pending_updates=True)
-    log.info("Telegram webhook включён: %s/tg/…", base)
+        _tg_app = build_application(webhook=True)
+        _tg_run(_tg_app.initialize())
+        url = f"{base}/tg/{webhook_secret(token)}"
+        _set_webhook_http(token, url)
+        log.info("Telegram webhook включён: %s/tg/…", base)
+    except Exception:
+        _tg_app = None
+        log.exception("Telegram webhook не поднялся")
 
 
 @app.post("/tg/<secret>")
@@ -72,12 +100,11 @@ def telegram_webhook(secret: str):
     data = request.get_json(force=True, silent=True)
     if not data:
         abort(400)
-    from asgiref.sync import async_to_sync
     from telegram import Update
 
     update = Update.de_json(data, _tg_app.bot)
     if update:
-        async_to_sync(_tg_app.process_update)(update)
+        _tg_run(_tg_app.process_update(update))
     return "ok"
 
 

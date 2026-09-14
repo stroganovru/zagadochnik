@@ -512,7 +512,7 @@ def build_application(*, webhook: bool = False) -> Application:
         raise RuntimeError("Нет TELEGRAM_BOT_TOKEN")
     builder = Application.builder().token(token).concurrent_updates(False)
     if webhook:
-        builder = builder.updater(None)
+        builder = builder.updater(None).job_queue(None)
     app = builder.build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))

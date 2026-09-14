@@ -498,24 +498,22 @@ async def on_successful_payment(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 
-def main() -> None:
-    db.init_db()
+def webhook_secret(token: str) -> str:
+    return hashlib.sha256(f"zagadochnik:{token}".encode()).hexdigest()[:32]
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    log.exception("update failed: %s", context.error)
+
+
+def build_application(*, webhook: bool = False) -> Application:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token or token.startswith("123456"):
-        raise SystemExit(
-            "Нет токена. BotFather → /newbot, затем:\n"
-            "  export TELEGRAM_BOT_TOKEN='...'\n"
-            "  python bot.py"
-        )
-    async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        log.exception("update failed: %s", context.error)
-
-    app = (
-        Application.builder()
-        .token(token)
-        .concurrent_updates(False)
-        .build()
-    )
+        raise RuntimeError("Нет TELEGRAM_BOT_TOKEN")
+    builder = Application.builder().token(token).concurrent_updates(False)
+    if webhook:
+        builder = builder.updater(None)
+    app = builder.build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("stats", cmd_stats))
@@ -525,6 +523,19 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
+    return app
+
+
+def main() -> None:
+    db.init_db()
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token or token.startswith("123456"):
+        raise SystemExit(
+            "Нет токена. BotFather → /newbot, затем:\n"
+            "  export TELEGRAM_BOT_TOKEN='...'\n"
+            "  python bot.py"
+        )
+    app = build_application(webhook=False)
     log.info("Загадочник слушает Telegram… %s", _COUNT_LINE)
     app.run_polling(drop_pending_updates=True)
 

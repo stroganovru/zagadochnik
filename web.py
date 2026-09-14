@@ -3,14 +3,19 @@
 
 from __future__ import annotations
 
+import hmac
+import logging
 import os
 import secrets
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template_string, request, session
+from flask import Flask, abort, jsonify, render_template_string, request, session
 
 import db
 from engine import counts, get_riddle, pick_random_riddle
+
+log = logging.getLogger("zagadochnik.web")
+_tg_app = None
 
 
 def _flask_secret() -> str:
@@ -30,6 +35,50 @@ def _flask_secret() -> str:
 
 app = Flask(__name__)
 app.secret_key = _flask_secret()
+
+
+def setup_telegram_webhook() -> None:
+    """Подключить Telegram к тому же gunicorn (Render Web Service)."""
+    global _tg_app
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token or token.startswith("123456"):
+        log.info("Telegram webhook: нет TELEGRAM_BOT_TOKEN — только веб")
+        return
+    base = (os.getenv("RENDER_EXTERNAL_URL") or os.getenv("WEBHOOK_URL") or "").rstrip("/")
+    if not base:
+        log.info("Telegram webhook: нет RENDER_EXTERNAL_URL / WEBHOOK_URL")
+        return
+    from asgiref.sync import async_to_sync
+
+    from bot import build_application, webhook_secret
+
+    _tg_app = build_application(webhook=True)
+    async_to_sync(_tg_app.initialize)()
+    async_to_sync(_tg_app.start)()
+    url = f"{base}/tg/{webhook_secret(token)}"
+    async_to_sync(_tg_app.bot.set_webhook)(url=url, drop_pending_updates=True)
+    log.info("Telegram webhook включён: %s/tg/…", base)
+
+
+@app.post("/tg/<secret>")
+def telegram_webhook(secret: str):
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    if _tg_app is None or not token:
+        abort(404)
+    from bot import webhook_secret
+
+    if not hmac.compare_digest(secret, webhook_secret(token)):
+        abort(403)
+    data = request.get_json(force=True, silent=True)
+    if not data:
+        abort(400)
+    from asgiref.sync import async_to_sync
+    from telegram import Update
+
+    update = Update.de_json(data, _tg_app.bot)
+    if update:
+        async_to_sync(_tg_app.process_update)(update)
+    return "ok"
 
 
 def key() -> str:
